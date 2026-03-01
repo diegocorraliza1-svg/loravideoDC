@@ -8,6 +8,17 @@ Model is downloaded at runtime and cached on Network Volume for fast subsequent 
 """
 
 import os
+
+# ── Redirect HuggingFace cache BEFORE any HF/diffusers imports ───────────────
+NETWORK_VOLUME_PATH = os.environ.get("NETWORK_VOLUME_PATH", "/runpod-volume")
+_hf_cache_dir = os.path.join(NETWORK_VOLUME_PATH, "hf_cache")
+os.makedirs(_hf_cache_dir, exist_ok=True)
+os.environ["HF_HOME"] = _hf_cache_dir
+os.environ["TRANSFORMERS_CACHE"] = _hf_cache_dir
+os.environ["HF_HUB_CACHE"] = _hf_cache_dir
+os.environ["HUGGINGFACE_HUB_CACHE"] = _hf_cache_dir
+print(f"[init] HF cache redirected to: {_hf_cache_dir}")
+
 import io
 import gc
 import time
@@ -29,34 +40,22 @@ DTYPE = torch.float16
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
 
-LORA_CACHE_DIR = "/tmp/loras"
+LORA_CACHE_DIR = os.path.join(NETWORK_VOLUME_PATH, "lora_cache")
 os.makedirs(LORA_CACHE_DIR, exist_ok=True)
 
-# Network Volume cache path — model persists between cold starts
-NETWORK_VOLUME_PATH = os.environ.get("NETWORK_VOLUME_PATH", "/runpod-volume")
 MODEL_CACHE_DIR = os.path.join(NETWORK_VOLUME_PATH, "wan22-i2v-a14b")
 
 print(f"[init] Model: {MODEL_ID}, Device: {DEVICE}")
 print(f"[init] Supabase URL configured: {bool(SUPABASE_URL)}")
 print(f"[init] Network Volume cache: {MODEL_CACHE_DIR}")
 
-# ── Load pipeline (download to Network Volume if needed) ─────────────────────
+# ── Now safe to import diffusers (cache env vars already set) ────────────────
 from diffusers import WanImageToVideoPipeline
 from diffusers.utils import export_to_video
 
 
 def load_pipeline():
-    """Load or download the Wan2.2 pipeline, caching on Network Volume.
-    
-    Downloads directly to the Network Volume to avoid filling Container Disk.
-    Uses HF_HOME env var to redirect HuggingFace cache to the volume.
-    """
-    # Redirect HuggingFace cache to Network Volume to avoid filling Container Disk
-    hf_cache_dir = os.path.join(NETWORK_VOLUME_PATH, "hf_cache")
-    os.makedirs(hf_cache_dir, exist_ok=True)
-    os.environ["HF_HOME"] = hf_cache_dir
-    os.environ["TRANSFORMERS_CACHE"] = hf_cache_dir
-    os.environ["HF_HUB_CACHE"] = hf_cache_dir
+    """Load or download the Wan2.2 pipeline, caching on Network Volume."""
 
     cache_marker = os.path.join(MODEL_CACHE_DIR, ".download_complete")
 
@@ -68,12 +67,11 @@ def load_pipeline():
         )
     else:
         print(f"[init] Model not found in cache. Downloading {MODEL_ID}...")
-        print(f"[init] HF cache redirected to: {hf_cache_dir}")
         print("[init] This will take a few minutes on first run only.")
         pipe = WanImageToVideoPipeline.from_pretrained(
             MODEL_ID,
             torch_dtype=DTYPE,
-            cache_dir=hf_cache_dir,
+            cache_dir=_hf_cache_dir,
         )
         # Save to Network Volume for next cold start
         os.makedirs(MODEL_CACHE_DIR, exist_ok=True)
@@ -84,14 +82,14 @@ def load_pipeline():
             f.write("ok")
         print("[init] Model cached successfully on Network Volume!")
 
-    pipe = pipe.to(DEVICE)
-
-    # Enable memory optimizations
+    # Enable memory optimizations — use cpu_offload WITHOUT .to(DEVICE)
+    # cpu_offload manages device placement automatically
     try:
         pipe.enable_model_cpu_offload()
         print("[init] CPU offload enabled")
     except Exception as e:
-        print(f"[init] CPU offload not available: {e}")
+        print(f"[init] CPU offload not available, falling back to .to(DEVICE): {e}")
+        pipe = pipe.to(DEVICE)
 
     try:
         pipe.enable_vae_slicing()
@@ -115,7 +113,7 @@ def download_lora(source: str) -> str:
     Download a LoRA file. Supports:
     - Supabase storage path (from 'loras' bucket)
     - Direct URL (https://...)
-    Cached in /tmp/loras.
+    Cached on Network Volume.
     """
     if source in _lora_cache:
         local = _lora_cache[source]
