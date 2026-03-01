@@ -1,9 +1,9 @@
 """
 Wan2.2 Image-to-Video RunPod Serverless Handler with LoRA support.
+
 Generates short video clips from a single input image.
 Supports loading multiple LoRAs (Lightning acceleration + style/motion LoRAs).
 Uploads result to Supabase Storage (bucket: generations).
-
 Model is downloaded at runtime and cached on container local disk (/workspace/cache).
 No Network Volume required — set Container Disk to 120GB+ in RunPod endpoint config.
 While the worker stays warm (FlashBoot), the model remains cached.
@@ -12,25 +12,20 @@ While the worker stays warm (FlashBoot), the model remains cached.
 import os
 
 # ── Redirect caches to container local disk ──────────────────────────────────
-# No Network Volume required — uses container disk (set Container Disk to 120GB+).
-# Model is re-downloaded on each cold start but cached while worker stays warm.
 LOCAL_CACHE_PATH = "/workspace/cache"
-
 _hf_cache_dir = os.path.join(LOCAL_CACHE_PATH, "hf_cache")
 _tmp_dir = os.path.join(LOCAL_CACHE_PATH, "tmp")
 os.makedirs(_hf_cache_dir, exist_ok=True)
 os.makedirs(_tmp_dir, exist_ok=True)
 
-# HuggingFace caches
 os.environ["HF_HOME"] = _hf_cache_dir
 os.environ["TRANSFORMERS_CACHE"] = _hf_cache_dir
 os.environ["HF_HUB_CACHE"] = _hf_cache_dir
 os.environ["HUGGINGFACE_HUB_CACHE"] = _hf_cache_dir
-
-# System temp dirs — HF downloads temp files here before moving to cache
 os.environ["TMPDIR"] = _tmp_dir
 os.environ["TEMP"] = _tmp_dir
 os.environ["TMP"] = _tmp_dir
+
 import tempfile
 tempfile.tempdir = _tmp_dir
 
@@ -66,17 +61,12 @@ print(f"[init] Model: {MODEL_ID}, Device: {DEVICE}")
 print(f"[init] Supabase URL configured: {bool(SUPABASE_URL)}")
 print(f"[init] Local cache dir: {MODEL_CACHE_DIR}")
 
-# ── Now safe to import diffusers (cache env vars already set) ────────────────
 from diffusers import WanImageToVideoPipeline
 from diffusers.utils import export_to_video
 
 
 def load_pipeline():
-    """Load or download the Wan2.2 pipeline, caching on local container disk.
-    
-    Downloads directly to the final cache dir to avoid needing 2x disk space.
-    """
-
+    """Load or download the Wan2.2 pipeline, caching on local container disk."""
     cache_marker = os.path.join(MODEL_CACHE_DIR, ".download_complete")
 
     if os.path.exists(cache_marker):
@@ -88,26 +78,24 @@ def load_pipeline():
     else:
         print(f"[init] Model not found in cache. Downloading {MODEL_ID}...")
         print("[init] This will take a few minutes on first run only.")
-        print(f"[init] Downloading directly to {MODEL_CACHE_DIR} (no intermediate copy)")
         os.makedirs(MODEL_CACHE_DIR, exist_ok=True)
-        # Download directly into the final directory — avoids 2x disk usage
+
         from huggingface_hub import snapshot_download
         snapshot_download(
             MODEL_ID,
             local_dir=MODEL_CACHE_DIR,
         )
-        # Mark download as complete
+
         with open(cache_marker, "w") as f:
             f.write("ok")
+
         print("[init] Model downloaded to local cache!")
-        # Now load from the cached dir
+
         pipe = WanImageToVideoPipeline.from_pretrained(
             MODEL_CACHE_DIR,
             torch_dtype=DTYPE,
         )
 
-    # Enable memory optimizations — use cpu_offload WITHOUT .to(DEVICE)
-    # cpu_offload manages device placement automatically
     try:
         pipe.enable_model_cpu_offload()
         print("[init] CPU offload enabled")
@@ -133,12 +121,7 @@ _lora_cache: dict[str, str] = {}
 
 
 def download_lora(source: str) -> str:
-    """
-    Download a LoRA file. Supports:
-    - Supabase storage path (from 'loras' bucket)
-    - Direct URL (https://...)
-    Cached in /tmp/loras.
-    """
+    """Download a LoRA file from Supabase or direct URL, with local caching."""
     if source in _lora_cache:
         local = _lora_cache[source]
         if os.path.exists(local):
@@ -148,18 +131,18 @@ def download_lora(source: str) -> str:
     if source.startswith("http://") or source.startswith("https://"):
         url = source
     else:
-        # Supabase public bucket
         url = f"{SUPABASE_URL}/storage/v1/object/public/loras/{source}"
 
     print(f"[lora] Downloading {url}...")
     r = requests.get(url, timeout=300)
     r.raise_for_status()
 
-    # Sanitize filename
     safe_name = source.replace("/", "_").replace(":", "_").replace("?", "_")[-120:]
     local_path = os.path.join(LORA_CACHE_DIR, safe_name)
+
     with open(local_path, "wb") as f:
         f.write(r.content)
+
     _lora_cache[source] = local_path
     size_mb = len(r.content) / 1024 / 1024
     print(f"[lora] Saved {local_path} ({size_mb:.1f} MB)")
@@ -199,10 +182,7 @@ def upload_to_supabase(data: bytes, storage_path: str, bucket: str = "generation
 
 # ── LoRA management ──────────────────────────────────────────────────────────
 def apply_loras(pipeline, lora_configs: list[dict]):
-    """
-    Load and set multiple LoRAs into the Wan pipeline.
-    Each config: { "path": str, "weight": float, "adapter_name": str }
-    """
+    """Load and set multiple LoRAs into the Wan pipeline."""
     try:
         pipeline.unload_lora_weights()
     except Exception:
@@ -233,7 +213,6 @@ def handler(job):
         inp = job["input"]
         job_id = job.get("id", "unknown")
 
-        # ── Parse inputs ─────────────────────────────────────────────────
         image_b64 = inp.get("image_base64")
         image_url = inp.get("image_url")
         prompt = inp.get("prompt", "")
@@ -248,17 +227,13 @@ def handler(job):
         user_id = inp.get("user_id", "unknown")
         project_id = inp.get("project_id", "global")
 
-        # ── LoRA config ──────────────────────────────────────────────────
         lightning_lora_url = inp.get("lightning_lora_url")
         lightning_lora_weight = float(inp.get("lightning_lora_weight", 1.0))
-
         style_lora_url = inp.get("style_lora_url")
         style_lora_weight = float(inp.get("style_lora_weight", 0.8))
-
         extra_lora_url = inp.get("extra_lora_url")
         extra_lora_weight = float(inp.get("extra_lora_weight", 0.7))
 
-        # ── Load input image ─────────────────────────────────────────────
         if image_b64:
             image_bytes = base64.b64decode(image_b64)
             image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
@@ -268,11 +243,9 @@ def handler(job):
         else:
             return {"status": "error", "error": "No input image provided (image_base64 or image_url required)"}
 
-        # Resize to target dimensions
         image = image.resize((width, height), Image.LANCZOS)
         print(f"[handler] Image loaded: {image.size}, frames={num_frames}, steps={num_inference_steps}")
 
-        # ── Build LoRA list ──────────────────────────────────────────────
         lora_configs = []
         if lightning_lora_url:
             lora_configs.append({
@@ -302,9 +275,9 @@ def handler(job):
             except Exception:
                 pass
 
-        # ── Generate ─────────────────────────────────────────────────────
         if seed == -1:
             seed = random.randint(0, 2**32 - 1)
+
         generator = torch.Generator(device=DEVICE).manual_seed(seed)
 
         output = pipe(
@@ -322,7 +295,6 @@ def handler(job):
         frames = output.frames[0]
         print(f"[handler] Generated {len(frames)} frames")
 
-        # ── Export to MP4 ────────────────────────────────────────────────
         with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
             tmp_path = tmp.name
 
@@ -334,16 +306,15 @@ def handler(job):
         os.unlink(tmp_path)
         print(f"[handler] Video encoded: {len(video_bytes)} bytes")
 
-        # ── Upload to Supabase ───────────────────────────────────────────
         timestamp = int(time.time())
         storage_path = f"{user_id}/{project_id}/video_{job_id}_{timestamp}.mp4"
         uploaded_path = upload_to_supabase(video_bytes, storage_path)
 
-        # ── Cleanup ──────────────────────────────────────────────────────
         try:
             pipe.unload_lora_weights()
         except Exception:
             pass
+
         del frames, output
         gc.collect()
         if torch.cuda.is_available():
@@ -386,6 +357,5 @@ def handler(job):
         return {"status": "error", "error": str(e)}
 
 
-# ── Start RunPod worker ──────────────────────────────────────────────────────
 import runpod
 runpod.serverless.start({"handler": handler})
