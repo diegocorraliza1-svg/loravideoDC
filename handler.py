@@ -46,12 +46,13 @@ import numpy as np
 from PIL import Image
 
 # ── Global config ────────────────────────────────────────────────────────────
-MODEL_ID = os.environ.get("MODEL_ID", "Wan-AI/Wan2.2-I2V-14B-480P-Diffusers")
+MODEL_ID = os.environ.get("MODEL_ID", "Wan-AI/Wan2.2-I2V-A14B-Diffusers")
 DEVICE = os.environ.get("DEVICE", "cuda")
-DTYPE = torch.float16
+DTYPE = torch.bfloat16
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
+HF_TOKEN = os.environ.get("HF_TOKEN", None)
 
 LORA_CACHE_DIR = os.path.join(LOCAL_CACHE_PATH, "lora_cache")
 os.makedirs(LORA_CACHE_DIR, exist_ok=True)
@@ -92,6 +93,7 @@ def get_pipeline():
             MODEL_CACHE_DIR,
             torch_dtype=DTYPE,
             low_cpu_mem_usage=True,
+            token=HF_TOKEN,
         )
     else:
         print(f"[model] Not in cache. Downloading {MODEL_ID}...", flush=True)
@@ -103,6 +105,7 @@ def get_pipeline():
             local_dir=MODEL_CACHE_DIR,
             resume_download=True,
             max_workers=4,
+            token=HF_TOKEN,
         )
 
         with open(cache_marker, "w") as f:
@@ -113,6 +116,7 @@ def get_pipeline():
             MODEL_CACHE_DIR,
             torch_dtype=DTYPE,
             low_cpu_mem_usage=True,
+            token=HF_TOKEN,
         )
 
     # Enable memory optimizations
