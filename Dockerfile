@@ -22,9 +22,9 @@ RUN pip install --no-cache-dir \
     torch==2.4.0+cu121 torchvision==0.19.0+cu121 \
     --index-url https://download.pytorch.org/whl/cu121
 
-# Python deps
+# Python deps — diffusers from GitHub main (required for Wan2.2 support)
 RUN pip install --no-cache-dir \
-    "diffusers[torch]>=0.32.0" \
+    git+https://github.com/huggingface/diffusers.git \
     "transformers>=4.46.0" \
     "accelerate>=0.34.0" \
     "safetensors>=0.4.2" \
