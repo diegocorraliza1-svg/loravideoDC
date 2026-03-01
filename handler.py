@@ -1,5 +1,5 @@
 """
-Wan2.2 Image-to-Video RunPod Serverless Handler with LoRA support.
+Wan2.2 Image-to-Video RunPod Serverless Handler with LoRA support
 Generates short video clips from a single input image.
 Supports loading multiple LoRAs (Lightning acceleration + style/motion LoRAs).
 Uploads result to Supabase Storage (bucket: generations).
