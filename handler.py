@@ -326,4 +326,4 @@ def handler(job):
         with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
             tmp_path = tmp.name
 
-        export_to_
+       export_to_video(frames, tmp_path, fps=fps)
