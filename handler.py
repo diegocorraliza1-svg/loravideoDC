@@ -61,17 +61,12 @@ print(f"[init] Model: {MODEL_ID}, Device: {DEVICE}")
 print(f"[init] Supabase URL configured: {bool(SUPABASE_URL)}")
 print(f"[init] Local cache dir: {MODEL_CACHE_DIR}")
 
+import ftfy
 from diffusers import WanImageToVideoPipeline
 from diffusers.utils import export_to_video
-
-# ── Hotfix: diffusers wan pipeline may reference ftfy without binding it ─────
-try:
-    import ftfy
-    import diffusers.pipelines.wan.pipeline_wan_i2v as wan_i2v_module
-    wan_i2v_module.ftfy = ftfy
-    print(f"[init] ftfy patch OK ({ftfy.__version__})")
-except Exception as e:
-    print(f"[init] ftfy patch warning: {e}")
+from diffusers.pipelines.wan import pipeline_wan_i2v
+pipeline_wan_i2v.ftfy = ftfy
+print("[init] ftfy monkey-patched into diffusers pipeline")
 
 
 def load_pipeline():
