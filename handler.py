@@ -326,4 +326,66 @@ def handler(job):
         with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
             tmp_path = tmp.name
 
-       export_to_video(frames, tmp_path, fps=fps)
+        export_to_video(frames, tmp_path, fps=fps)
+
+        with open(tmp_path, "rb") as f:
+            video_bytes = f.read()
+
+        os.unlink(tmp_path)
+        print(f"[handler] Video encoded: {len(video_bytes)} bytes")
+
+        # ── Upload to Supabase ───────────────────────────────────────────
+        timestamp = int(time.time())
+        storage_path = f"{user_id}/{project_id}/video_{job_id}_{timestamp}.mp4"
+        uploaded_path = upload_to_supabase(video_bytes, storage_path)
+
+        # ── Cleanup ──────────────────────────────────────────────────────
+        try:
+            pipe.unload_lora_weights()
+        except Exception:
+            pass
+        del frames, output
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        result = {
+            "status": "success",
+            "video": uploaded_path or storage_path,
+            "storage": bool(uploaded_path),
+            "seed": seed,
+            "metadata": {
+                "prompt": prompt,
+                "negative_prompt": negative_prompt,
+                "num_frames": num_frames,
+                "guidance_scale": guidance_scale,
+                "num_inference_steps": num_inference_steps,
+                "fps": fps,
+                "width": width,
+                "height": height,
+                "model": MODEL_ID,
+                "loras": [
+                    {"name": c["adapter_name"], "weight": c["weight"]}
+                    for c in lora_configs
+                ],
+            },
+        }
+
+        print(f"[handler] Done: {result['video']}")
+        return result
+
+    except Exception as e:
+        traceback.print_exc()
+        try:
+            pipe.unload_lora_weights()
+        except Exception:
+            pass
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        return {"status": "error", "error": str(e)}
+
+
+# ── Start RunPod worker ──────────────────────────────────────────────────────
+import runpod
+runpod.serverless.start({"handler": handler})
