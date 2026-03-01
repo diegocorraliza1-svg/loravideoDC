@@ -45,7 +45,7 @@ import numpy as np
 from PIL import Image
 
 # ── Global config ────────────────────────────────────────────────────────────
-MODEL_ID = os.environ.get("MODEL_ID", "Wan-AI/Wan2.2-I2V-A14B-Diffusers")
+MODEL_ID = os.environ.get("MODEL_ID", "Wan-AI/Wan2.2-I2V-14B-480P-Diffusers")
 DEVICE = os.environ.get("DEVICE", "cuda")
 DTYPE = torch.float16
 
@@ -55,7 +55,7 @@ SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
 LORA_CACHE_DIR = os.path.join(LOCAL_CACHE_PATH, "lora_cache")
 os.makedirs(LORA_CACHE_DIR, exist_ok=True)
 
-MODEL_CACHE_DIR = os.path.join(LOCAL_CACHE_PATH, "wan22-i2v-a14b")
+MODEL_CACHE_DIR = os.path.join(LOCAL_CACHE_PATH, "wan22-i2v-14b")
 
 print(f"[init] Model: {MODEL_ID}, Device: {DEVICE}")
 print(f"[init] Supabase URL configured: {bool(SUPABASE_URL)}")
@@ -64,9 +64,18 @@ print(f"[init] Local cache dir: {MODEL_CACHE_DIR}")
 from diffusers import WanImageToVideoPipeline
 from diffusers.utils import export_to_video
 
+# ── Hotfix: diffusers wan pipeline may reference ftfy without binding it ─────
+try:
+    import ftfy
+    import diffusers.pipelines.wan.pipeline_wan_i2v as wan_i2v_module
+    wan_i2v_module.ftfy = ftfy
+    print(f"[init] ftfy patch OK ({ftfy.__version__})")
+except Exception as e:
+    print(f"[init] ftfy patch warning: {e}")
+
 
 def load_pipeline():
-    """Load or download the Wan2.2 pipeline, caching on local container disk."""
+    """Load or download the Wan2.2 pipeline with memory-efficient loading."""
     cache_marker = os.path.join(MODEL_CACHE_DIR, ".download_complete")
 
     if os.path.exists(cache_marker):
@@ -74,33 +83,32 @@ def load_pipeline():
         pipe = WanImageToVideoPipeline.from_pretrained(
             MODEL_CACHE_DIR,
             torch_dtype=DTYPE,
+            low_cpu_mem_usage=True,
         )
     else:
         print(f"[init] Model not found in cache. Downloading {MODEL_ID}...")
-        print("[init] This will take a few minutes on first run only.")
+        print(f"[init] Downloading directly to {MODEL_CACHE_DIR}")
         os.makedirs(MODEL_CACHE_DIR, exist_ok=True)
 
         from huggingface_hub import snapshot_download
-        snapshot_download(
-            MODEL_ID,
-            local_dir=MODEL_CACHE_DIR,
-        )
+        snapshot_download(MODEL_ID, local_dir=MODEL_CACHE_DIR)
 
         with open(cache_marker, "w") as f:
             f.write("ok")
-
         print("[init] Model downloaded to local cache!")
 
         pipe = WanImageToVideoPipeline.from_pretrained(
             MODEL_CACHE_DIR,
             torch_dtype=DTYPE,
+            low_cpu_mem_usage=True,
         )
 
+    # Enable memory optimizations
     try:
         pipe.enable_model_cpu_offload()
         print("[init] CPU offload enabled")
     except Exception as e:
-        print(f"[init] CPU offload not available, falling back to .to(DEVICE): {e}")
+        print(f"[init] CPU offload fallback to .to(DEVICE): {e}")
         pipe = pipe.to(DEVICE)
 
     try:
@@ -121,7 +129,7 @@ _lora_cache: dict[str, str] = {}
 
 
 def download_lora(source: str) -> str:
-    """Download a LoRA file from Supabase or direct URL, with local caching."""
+    """Download a LoRA file from URL or Supabase storage path."""
     if source in _lora_cache:
         local = _lora_cache[source]
         if os.path.exists(local):
@@ -180,9 +188,8 @@ def upload_to_supabase(data: bytes, storage_path: str, bucket: str = "generation
     return None
 
 
-# ── LoRA management ──────────────────────────────────────────────────────────
 def apply_loras(pipeline, lora_configs: list[dict]):
-    """Load and set multiple LoRAs into the Wan pipeline."""
+    """Load and set multiple LoRAs into the pipeline."""
     try:
         pipeline.unload_lora_weights()
     except Exception:
@@ -234,6 +241,7 @@ def handler(job):
         extra_lora_url = inp.get("extra_lora_url")
         extra_lora_weight = float(inp.get("extra_lora_weight", 0.7))
 
+        # Load input image
         if image_b64:
             image_bytes = base64.b64decode(image_b64)
             image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
@@ -241,30 +249,19 @@ def handler(job):
             resp = requests.get(image_url, timeout=30)
             image = Image.open(io.BytesIO(resp.content)).convert("RGB")
         else:
-            return {"status": "error", "error": "No input image provided (image_base64 or image_url required)"}
+            return {"status": "error", "error": "No input image provided"}
 
         image = image.resize((width, height), Image.LANCZOS)
         print(f"[handler] Image loaded: {image.size}, frames={num_frames}, steps={num_inference_steps}")
 
+        # Build LoRA list
         lora_configs = []
         if lightning_lora_url:
-            lora_configs.append({
-                "path": lightning_lora_url,
-                "weight": lightning_lora_weight,
-                "adapter_name": "lightning",
-            })
+            lora_configs.append({"path": lightning_lora_url, "weight": lightning_lora_weight, "adapter_name": "lightning"})
         if style_lora_url:
-            lora_configs.append({
-                "path": style_lora_url,
-                "weight": style_lora_weight,
-                "adapter_name": "style",
-            })
+            lora_configs.append({"path": style_lora_url, "weight": style_lora_weight, "adapter_name": "style"})
         if extra_lora_url:
-            lora_configs.append({
-                "path": extra_lora_url,
-                "weight": extra_lora_weight,
-                "adapter_name": "extra",
-            })
+            lora_configs.append({"path": extra_lora_url, "weight": extra_lora_weight, "adapter_name": "extra"})
 
         if lora_configs:
             print(f"[handler] Applying {len(lora_configs)} LoRA(s)...")
@@ -275,6 +272,7 @@ def handler(job):
             except Exception:
                 pass
 
+        # Generate
         if seed == -1:
             seed = random.randint(0, 2**32 - 1)
 
@@ -295,6 +293,7 @@ def handler(job):
         frames = output.frames[0]
         print(f"[handler] Generated {len(frames)} frames")
 
+        # Export to MP4
         with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
             tmp_path = tmp.name
 
@@ -306,10 +305,12 @@ def handler(job):
         os.unlink(tmp_path)
         print(f"[handler] Video encoded: {len(video_bytes)} bytes")
 
+        # Upload to Supabase
         timestamp = int(time.time())
         storage_path = f"{user_id}/{project_id}/video_{job_id}_{timestamp}.mp4"
         uploaded_path = upload_to_supabase(video_bytes, storage_path)
 
+        # Cleanup
         try:
             pipe.unload_lora_weights()
         except Exception:
@@ -335,10 +336,7 @@ def handler(job):
                 "width": width,
                 "height": height,
                 "model": MODEL_ID,
-                "loras": [
-                    {"name": c["adapter_name"], "weight": c["weight"]}
-                    for c in lora_configs
-                ],
+                "loras": [{"name": c["adapter_name"], "weight": c["weight"]} for c in lora_configs],
             },
         }
 
