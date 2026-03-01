@@ -4,12 +4,13 @@ Wan2.2 Image-to-Video RunPod Serverless Handler with LoRA support.
 Generates short video clips from a single input image.
 Supports loading multiple LoRAs (Lightning acceleration + style/motion LoRAs).
 Uploads result to Supabase Storage (bucket: generations).
-Model is downloaded at runtime and cached on container local disk (/workspace/cache).
+Model is downloaded LAZILY on first request and cached on container local disk.
 No Network Volume required — set Container Disk to 120GB+ in RunPod endpoint config.
 While the worker stays warm (FlashBoot), the model remains cached.
 """
 
 import os
+import sys
 
 # ── Redirect caches to container local disk ──────────────────────────────────
 LOCAL_CACHE_PATH = "/workspace/cache"
@@ -29,8 +30,8 @@ os.environ["TMP"] = _tmp_dir
 import tempfile
 tempfile.tempdir = _tmp_dir
 
-print(f"[init] HF cache → {_hf_cache_dir}")
-print(f"[init] TMPDIR  → {_tmp_dir}")
+print(f"[init] HF cache → {_hf_cache_dir}", flush=True)
+print(f"[init] TMPDIR  → {_tmp_dir}", flush=True)
 
 import io
 import gc
@@ -57,42 +58,58 @@ os.makedirs(LORA_CACHE_DIR, exist_ok=True)
 
 MODEL_CACHE_DIR = os.path.join(LOCAL_CACHE_PATH, "wan22-i2v-14b")
 
-print(f"[init] Model: {MODEL_ID}, Device: {DEVICE}")
-print(f"[init] Supabase URL configured: {bool(SUPABASE_URL)}")
-print(f"[init] Local cache dir: {MODEL_CACHE_DIR}")
+print(f"[init] Model: {MODEL_ID}, Device: {DEVICE}", flush=True)
+print(f"[init] Supabase URL configured: {bool(SUPABASE_URL)}", flush=True)
+print(f"[init] Local cache dir: {MODEL_CACHE_DIR}", flush=True)
 
 import ftfy
 from diffusers import WanImageToVideoPipeline
 from diffusers.utils import export_to_video
 from diffusers.pipelines.wan import pipeline_wan_i2v
 pipeline_wan_i2v.ftfy = ftfy
-print("[init] ftfy monkey-patched into diffusers pipeline")
+print("[init] ftfy monkey-patched into diffusers pipeline", flush=True)
+
+# ── Lazy pipeline holder ─────────────────────────────────────────────────────
+# CRITICAL: Do NOT load model at import time. RunPod will kill the container
+# if it doesn't report ready quickly. We load on first request instead.
+_pipe = None
 
 
-def load_pipeline():
-    """Load or download the Wan2.2 pipeline with memory-efficient loading."""
+def get_pipeline():
+    """Lazy-load the Wan2.2 pipeline on first call. Cached for subsequent calls."""
+    global _pipe
+    if _pipe is not None:
+        return _pipe
+
+    print("[model] Loading pipeline (first request)...", flush=True)
+    start_time = time.time()
+
     cache_marker = os.path.join(MODEL_CACHE_DIR, ".download_complete")
 
     if os.path.exists(cache_marker):
-        print(f"[init] Loading model from local cache: {MODEL_CACHE_DIR}")
-        pipe = WanImageToVideoPipeline.from_pretrained(
+        print(f"[model] Loading from local cache: {MODEL_CACHE_DIR}", flush=True)
+        _pipe = WanImageToVideoPipeline.from_pretrained(
             MODEL_CACHE_DIR,
             torch_dtype=DTYPE,
             low_cpu_mem_usage=True,
         )
     else:
-        print(f"[init] Model not found in cache. Downloading {MODEL_ID}...")
-        print(f"[init] Downloading directly to {MODEL_CACHE_DIR}")
+        print(f"[model] Not in cache. Downloading {MODEL_ID}...", flush=True)
         os.makedirs(MODEL_CACHE_DIR, exist_ok=True)
 
         from huggingface_hub import snapshot_download
-        snapshot_download(MODEL_ID, local_dir=MODEL_CACHE_DIR)
+        snapshot_download(
+            MODEL_ID,
+            local_dir=MODEL_CACHE_DIR,
+            resume_download=True,
+            max_workers=4,
+        )
 
         with open(cache_marker, "w") as f:
             f.write("ok")
-        print("[init] Model downloaded to local cache!")
+        print("[model] Download complete!", flush=True)
 
-        pipe = WanImageToVideoPipeline.from_pretrained(
+        _pipe = WanImageToVideoPipeline.from_pretrained(
             MODEL_CACHE_DIR,
             torch_dtype=DTYPE,
             low_cpu_mem_usage=True,
@@ -100,23 +117,21 @@ def load_pipeline():
 
     # Enable memory optimizations
     try:
-        pipe.enable_model_cpu_offload()
-        print("[init] CPU offload enabled")
+        _pipe.enable_model_cpu_offload()
+        print("[model] CPU offload enabled", flush=True)
     except Exception as e:
-        print(f"[init] CPU offload fallback to .to(DEVICE): {e}")
-        pipe = pipe.to(DEVICE)
+        print(f"[model] CPU offload fallback to .to(DEVICE): {e}", flush=True)
+        _pipe = _pipe.to(DEVICE)
 
     try:
-        pipe.enable_vae_slicing()
-        print("[init] VAE slicing enabled")
+        _pipe.enable_vae_slicing()
+        print("[model] VAE slicing enabled", flush=True)
     except Exception:
         pass
 
-    print("[init] Pipeline ready!")
-    return pipe
-
-
-pipe = load_pipeline()
+    elapsed = time.time() - start_time
+    print(f"[model] Pipeline ready! (took {elapsed:.1f}s)", flush=True)
+    return _pipe
 
 
 # ── Supabase helpers ─────────────────────────────────────────────────────────
@@ -128,7 +143,7 @@ def download_lora(source: str) -> str:
     if source in _lora_cache:
         local = _lora_cache[source]
         if os.path.exists(local):
-            print(f"[lora] Cache hit: {source}")
+            print(f"[lora] Cache hit: {source}", flush=True)
             return local
 
     if source.startswith("http://") or source.startswith("https://"):
@@ -136,7 +151,7 @@ def download_lora(source: str) -> str:
     else:
         url = f"{SUPABASE_URL}/storage/v1/object/public/loras/{source}"
 
-    print(f"[lora] Downloading {url}...")
+    print(f"[lora] Downloading {url}...", flush=True)
     r = requests.get(url, timeout=300)
     r.raise_for_status()
 
@@ -148,7 +163,7 @@ def download_lora(source: str) -> str:
 
     _lora_cache[source] = local_path
     size_mb = len(r.content) / 1024 / 1024
-    print(f"[lora] Saved {local_path} ({size_mb:.1f} MB)")
+    print(f"[lora] Saved {local_path} ({size_mb:.1f} MB)", flush=True)
     return local_path
 
 
@@ -156,7 +171,7 @@ def upload_to_supabase(data: bytes, storage_path: str, bucket: str = "generation
                        content_type: str = "video/mp4", max_retries: int = 3):
     """Upload bytes to Supabase Storage with retries."""
     if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
-        print("[upload] Supabase not configured, skipping upload")
+        print("[upload] Supabase not configured, skipping upload", flush=True)
         return None
 
     url = f"{SUPABASE_URL}/storage/v1/object/{bucket}/{storage_path}"
@@ -171,15 +186,15 @@ def upload_to_supabase(data: bytes, storage_path: str, bucket: str = "generation
         try:
             resp = requests.post(url, headers=headers, data=data, timeout=120)
             if resp.status_code in (200, 201):
-                print(f"[upload] Success: {storage_path} ({len(data)} bytes)")
+                print(f"[upload] Success: {storage_path} ({len(data)} bytes)", flush=True)
                 return storage_path
-            print(f"[upload] Attempt {attempt+1} failed: {resp.status_code} {resp.text[:200]}")
+            print(f"[upload] Attempt {attempt+1} failed: {resp.status_code} {resp.text[:200]}", flush=True)
         except Exception as e:
-            print(f"[upload] Attempt {attempt+1} error: {e}")
+            print(f"[upload] Attempt {attempt+1} error: {e}", flush=True)
         if attempt < max_retries - 1:
             time.sleep(2 ** attempt)
 
-    print(f"[upload] All retries failed for {storage_path}")
+    print(f"[upload] All retries failed for {storage_path}", flush=True)
     return None
 
 
@@ -202,16 +217,20 @@ def apply_loras(pipeline, lora_configs: list[dict]):
         pipeline.load_lora_weights(local_path, adapter_name=adapter_name)
         adapter_names.append(adapter_name)
         adapter_weights.append(cfg["weight"])
-        print(f"[lora] Loaded '{adapter_name}' weight={cfg['weight']}")
+        print(f"[lora] Loaded '{adapter_name}' weight={cfg['weight']}", flush=True)
 
     pipeline.set_adapters(adapter_names, adapter_weights=adapter_weights)
-    print(f"[lora] Active adapters: {adapter_names} weights: {adapter_weights}")
+    print(f"[lora] Active adapters: {adapter_names} weights: {adapter_weights}", flush=True)
 
 
 # ── Request handler ──────────────────────────────────────────────────────────
 def handler(job):
     """Process an image-to-video generation request with optional LoRAs."""
+    pipe = None
     try:
+        # Lazy-load model on first request
+        pipe = get_pipeline()
+
         inp = job["input"]
         job_id = job.get("id", "unknown")
 
@@ -247,7 +266,7 @@ def handler(job):
             return {"status": "error", "error": "No input image provided"}
 
         image = image.resize((width, height), Image.LANCZOS)
-        print(f"[handler] Image loaded: {image.size}, frames={num_frames}, steps={num_inference_steps}")
+        print(f"[handler] Image loaded: {image.size}, frames={num_frames}, steps={num_inference_steps}", flush=True)
 
         # Build LoRA list
         lora_configs = []
@@ -259,7 +278,7 @@ def handler(job):
             lora_configs.append({"path": extra_lora_url, "weight": extra_lora_weight, "adapter_name": "extra"})
 
         if lora_configs:
-            print(f"[handler] Applying {len(lora_configs)} LoRA(s)...")
+            print(f"[handler] Applying {len(lora_configs)} LoRA(s)...", flush=True)
             apply_loras(pipe, lora_configs)
         else:
             try:
@@ -271,7 +290,8 @@ def handler(job):
         if seed == -1:
             seed = random.randint(0, 2**32 - 1)
 
-        generator = torch.Generator(device=DEVICE).manual_seed(seed)
+        # Use CPU generator — compatible with model CPU offload
+        generator = torch.Generator(device="cpu").manual_seed(seed)
 
         output = pipe(
             image=image,
@@ -286,7 +306,7 @@ def handler(job):
         )
 
         frames = output.frames[0]
-        print(f"[handler] Generated {len(frames)} frames")
+        print(f"[handler] Generated {len(frames)} frames", flush=True)
 
         # Export to MP4
         with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
@@ -298,7 +318,7 @@ def handler(job):
             video_bytes = f.read()
 
         os.unlink(tmp_path)
-        print(f"[handler] Video encoded: {len(video_bytes)} bytes")
+        print(f"[handler] Video encoded: {len(video_bytes)} bytes", flush=True)
 
         # Upload to Supabase
         timestamp = int(time.time())
@@ -335,20 +355,23 @@ def handler(job):
             },
         }
 
-        print(f"[handler] Done: {result['video']}")
+        print(f"[handler] Done: {result['video']}", flush=True)
         return result
 
     except Exception as e:
         traceback.print_exc()
-        try:
-            pipe.unload_lora_weights()
-        except Exception:
-            pass
+        if pipe is not None:
+            try:
+                pipe.unload_lora_weights()
+            except Exception:
+                pass
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         return {"status": "error", "error": str(e)}
 
+
+print("[init] Worker starting (model will load on first request)...", flush=True)
 
 import runpod
 runpod.serverless.start({"handler": handler})
