@@ -31,11 +31,10 @@ RUN pip install --no-cache-dir \
     "huggingface-hub>=0.25.0" \
     "imageio[ffmpeg]>=2.34.0" \
     "imageio-ffmpeg>=0.5.1" \
+    "ftfy>=6.2.3" \
     Pillow \
     requests \
     runpod
-
-# NOTE: Model downloaded at runtime, cached on Network Volume
 
 # Verify imports
 RUN python -c "\
@@ -43,6 +42,7 @@ import numpy; print(f'numpy {numpy.__version__}'); \
 import torch; print(f'torch {torch.__version__}'); \
 import diffusers; print(f'diffusers {diffusers.__version__}'); \
 import imageio; print(f'imageio {imageio.__version__}'); \
+import ftfy; print(f'ftfy {ftfy.__version__}'); \
 import runpod; print(f'runpod {runpod.__version__}'); \
 print('ALL IMPORTS OK')"
 
