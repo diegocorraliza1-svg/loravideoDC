@@ -9,15 +9,30 @@ Model is downloaded at runtime and cached on Network Volume for fast subsequent 
 
 import os
 
-# ── Redirect HuggingFace cache BEFORE any HF/diffusers imports ───────────────
+# ── Redirect ALL caches and temp dirs to Network Volume ──────────────────────
+# This prevents "Disk quota exceeded" on the container disk during model download.
 NETWORK_VOLUME_PATH = os.environ.get("NETWORK_VOLUME_PATH", "/runpod-volume")
+
 _hf_cache_dir = os.path.join(NETWORK_VOLUME_PATH, "hf_cache")
+_tmp_dir = os.path.join(NETWORK_VOLUME_PATH, "tmp")
 os.makedirs(_hf_cache_dir, exist_ok=True)
+os.makedirs(_tmp_dir, exist_ok=True)
+
+# HuggingFace caches
 os.environ["HF_HOME"] = _hf_cache_dir
 os.environ["TRANSFORMERS_CACHE"] = _hf_cache_dir
 os.environ["HF_HUB_CACHE"] = _hf_cache_dir
 os.environ["HUGGINGFACE_HUB_CACHE"] = _hf_cache_dir
-print(f"[init] HF cache redirected to: {_hf_cache_dir}")
+
+# System temp dirs — HF downloads temp files here before moving to cache
+os.environ["TMPDIR"] = _tmp_dir
+os.environ["TEMP"] = _tmp_dir
+os.environ["TMP"] = _tmp_dir
+import tempfile
+tempfile.tempdir = _tmp_dir
+
+print(f"[init] HF cache → {_hf_cache_dir}")
+print(f"[init] TMPDIR  → {_tmp_dir}")
 
 import io
 import gc
@@ -25,7 +40,6 @@ import time
 import base64
 import random
 import traceback
-import tempfile
 
 import torch
 import requests
@@ -113,7 +127,7 @@ def download_lora(source: str) -> str:
     Download a LoRA file. Supports:
     - Supabase storage path (from 'loras' bucket)
     - Direct URL (https://...)
-    Cached on Network Volume.
+    Cached in /tmp/loras.
     """
     if source in _lora_cache:
         local = _lora_cache[source]
