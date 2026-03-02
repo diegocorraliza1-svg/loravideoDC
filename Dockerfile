@@ -1,4 +1,5 @@
 # ── Wan2.2 Image-to-Video Worker ─────────────────────────────────────────────
+
 FROM nvidia/cuda:12.1.1-cudnn8-devel-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -32,6 +33,7 @@ RUN pip install --no-cache-dir \
     "imageio[ffmpeg]>=2.34.0" \
     "imageio-ffmpeg>=0.5.1" \
     "ftfy>=6.2.3" \
+    "peft>=0.13.0" \
     Pillow \
     requests \
     runpod
@@ -41,6 +43,7 @@ RUN python -c "\
 import numpy; print(f'numpy {numpy.__version__}'); \
 import torch; print(f'torch {torch.__version__}'); \
 import diffusers; print(f'diffusers {diffusers.__version__}'); \
+import peft; print(f'peft {peft.__version__}'); \
 import imageio; print(f'imageio {imageio.__version__}'); \
 import ftfy; print(f'ftfy {ftfy.__version__}'); \
 import runpod; print(f'runpod {runpod.__version__}'); \
