@@ -269,6 +269,22 @@ def handler(job):
         else:
             return {"status": "error", "error": "No input image provided"}
 
+        # Center-crop to target aspect ratio, then resize (no stretching)
+        target_ratio = width / height
+        img_w, img_h = image.size
+        img_ratio = img_w / img_h
+
+        if img_ratio > target_ratio:
+            # Image is wider → crop sides
+            new_w = int(img_h * target_ratio)
+            left = (img_w - new_w) // 2
+            image = image.crop((left, 0, left + new_w, img_h))
+        elif img_ratio < target_ratio:
+            # Image is taller → crop top/bottom
+            new_h = int(img_w / target_ratio)
+            top = (img_h - new_h) // 2
+            image = image.crop((0, top, img_w, top + new_h))
+
         image = image.resize((width, height), Image.LANCZOS)
         print(f"[handler] Image loaded: {image.size}, frames={num_frames}, steps={num_inference_steps}", flush=True)
 
